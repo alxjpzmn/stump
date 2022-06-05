@@ -1,8 +1,9 @@
 use std::{
 	collections::{HashMap, HashSet},
-	path::{Path, PathBuf},
+	path::{Path, PathBuf}, sync::Arc,
 };
 
+use rocket::{tokio::{self, sync::{oneshot, mpsc::{unbounded_channel, self}}}, futures::channel::mpsc::UnboundedSender};
 use prisma_client_rust::{raw, PrismaValue};
 use walkdir::{ WalkDir};
 
@@ -316,22 +317,6 @@ impl LibraryScanner {
 	}
 }
 
-//     async fn analyze_media(&self, key: String) {
-//         let media = self.media.get(&key).unwrap();
-
-//         let id = media.id;
-
-//         println!("analyzing media: {:?}", media);
-
-//         if media.status == FileStatus::Missing {
-//             log::info!("Media found");
-//             self.set_media_status(id, FileStatus::Ready, media.path.clone())
-//                 .await;
-//         }
-
-//         // TODO: more checks??
-//     }
-
 //     async fn set_media_status(&self, id: i32, status: FileStatus, path: String) {
 //         match queries::media::set_status(self.db, id, status).await {
 //             Ok(_) => {
@@ -361,3 +346,248 @@ impl LibraryScanner {
 //             }
 //         }
 //     }
+
+#[derive(Clone, Debug)]
+enum ParallelScanRequest {
+
+}
+
+#[derive(Clone, Debug)]
+enum ParallelScanResponse {
+
+}
+
+#[derive(Clone)]
+struct ParallelLibraryScanner {
+	runner: (String, u64),
+	ctx: Context,
+	library: library::Data,
+	series_map: HashMap<String, series::Data>,
+	media_map: HashMap<String, media::Data>,
+}
+
+impl ParallelLibraryScanner {
+	pub fn new(library: library::Data, ctx: Context, runner: (String, u64)) -> ParallelLibraryScanner {
+		let series = library
+			.series()
+			.expect("Failed to get series in library")
+			.to_owned();
+
+		let mut series_map = HashMap::new();
+		let mut media_map = HashMap::new();
+
+		// TODO: Don't love this solution...
+		for s in series {
+			let media = s.media().expect("Failed to get media in series").to_owned();
+
+			series_map.insert(s.path.clone(), s);
+
+			for m in media {
+				media_map.insert(m.path.clone(), m);
+			}
+		}
+
+		ParallelLibraryScanner {
+			ctx,
+			library,
+			series_map,
+			media_map,
+			runner,
+		}
+	}
+
+	fn on_progress(&self, event: ClientEvent) {
+		let _ = self.ctx.emit_client_event(event);
+	}
+
+	pub async fn scan(&mut self) {
+		let (update_sender, mut update_receiver) = unbounded_channel::<ClientEvent>();
+		let (request_sender, mut request_receiver) = unbounded_channel::<ParallelScanRequest>();
+		let (response_sender, response_receiver) = unbounded_channel::<ParallelScanResponse>();
+
+		let parallel_scanner = ParallelScanner::new(
+			update_sender,
+			request_sender,
+			response_receiver,
+		);
+
+		let ctx = Arc::new(self.ctx.clone());
+
+		tokio::spawn(async move {
+			loop {
+				tokio::select! {
+					Some(update) = update_receiver.recv() => {
+						let _ = ctx.emit_client_event(update);
+					}
+					// Some(task) = t_rx.recv() => {
+					// 	self.handle_task(task).await;
+					// }
+					// Some(event) = e_rx.recv() => {
+					// 	self.handle_event(event).await;
+					// }
+				}
+			}
+		});
+
+		ParallelScanner::run(Arc::new(parallel_scanner)).await;
+
+
+	}
+
+	// async fn scan_dir(self, path: PathBuf) {
+
+	// }
+
+	// pub async fn scan(mut self: Arc<Self>) {
+	// 	let mut visited_series = HashMap::<String, bool>::new();
+	// 	let mut visited_media = HashMap::<String, bool>::new();
+
+	// 	for entry in std::fs::read_dir(self.library.path.clone()).unwrap().filter_map(|e| e.ok()) {
+	// 		let entry_path = entry.path();
+
+	// 		if entry_path.is_dir() {
+	// 			tokio::spawn({
+	// 				let me = Arc::clone(&self);
+	// 				async  {
+	// 					me.scan_dir(entry_path).await;
+	// 				}
+	// 			});
+
+	// 			continue;
+	// 		}
+	// 	}
+	// }
+}
+
+// #[derive(Clone)]
+struct ParallelScanner {
+	pub client_event_sender: mpsc::UnboundedSender<ClientEvent>,
+	pub execution_sender: mpsc::UnboundedSender<ParallelScanRequest>,
+	pub execution_receiver: mpsc::UnboundedReceiver<ParallelScanResponse>,
+}
+
+impl ParallelScanner {
+	pub fn new(client_event_sender: mpsc::UnboundedSender<ClientEvent>, execution_sender:mpsc::UnboundedSender<ParallelScanRequest>, execution_receiver: mpsc::UnboundedReceiver<ParallelScanResponse>) -> ParallelScanner {
+
+		ParallelScanner {
+			client_event_sender,
+			execution_sender,
+			execution_receiver
+		}
+	}
+
+	fn on_progress(&self, event: ClientEvent) {
+		let _ = self.client_event_sender.send(event);
+	}
+
+	async fn scan_dir(&self, path: PathBuf) {
+
+	}
+
+	pub async fn run(self: Arc<Self>) {
+		for entry in std::fs::read_dir("/").unwrap().filter_map(|e| e.ok()) {
+			let entry_path = entry.path();
+
+			if entry_path.is_dir() {
+				tokio::spawn({
+					let me = Arc::clone(&self);
+					async move {
+						me.scan_dir(entry_path).await;
+					}
+				});
+
+				continue;
+			}
+		}
+	}
+}
+
+
+
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	use rocket::tokio;
+	use walkdir::*;
+	use crate::{prisma::library, config::context::*};
+
+	async fn benchmark_normal(library: library::Data, ctx: Context) {
+		let files_to_process = WalkDir::new(&library.path)
+			.into_iter()
+			.filter_map(|e| e.ok())
+			.count() as u64;
+
+		let mut scanner =
+			LibraryScanner::new(library, ctx.get_ctx(), ("normal_scanner".to_string(), files_to_process));
+
+		let start = std::time::Instant::now();
+
+		scanner.scan_library().await;
+
+		let duration = start.elapsed();
+
+		println!(
+			"Normal library scan: {} files in {}.{:03} seconds",
+			files_to_process,
+			duration.as_secs(),
+			duration.subsec_millis()
+		);
+	}
+
+	async fn benchmark_parallel(library: library::Data, ctx: Context) {
+		let files_to_process = WalkDir::new(&library.path)
+			.into_iter()
+			.filter_map(|e| e.ok())
+			.count() as u64;
+
+		let mut scanner =
+			ParallelLibraryScanner::new(library, ctx.get_ctx(), ("parallel_scanner".to_string(), files_to_process));
+
+		let start = std::time::Instant::now();
+
+		scanner.scan().await;
+
+		let duration = start.elapsed();
+
+		println!(
+			"Parallel library scan: {} files in {}.{:03} seconds",
+			files_to_process,
+			duration.as_secs(),
+			duration.subsec_millis()
+		);
+	}
+
+
+	#[tokio::test]
+	async fn benchmark() {
+		let ctx = Context::mock().await;
+
+		let library = ctx.get_db().library().find_first(vec![]).exec().await.expect("Failed to find a library").unwrap();
+
+		benchmark_normal(library.clone(), ctx.get_ctx()).await;
+
+		// delete library
+		ctx.get_db()
+			.library()
+			.find_unique(library::id::equals(library.id.clone()))
+			.delete()
+			.exec()
+			.await
+			.expect("Failed to delete library");
+
+		// create library
+		let library = ctx.get_db()
+			.library()
+			.create(library::name::set(library.name.clone()), library::path::set(library.path.clone()), vec![])
+			.exec()
+			.await
+			.expect("Failed to create library");
+
+
+		benchmark_parallel(library, ctx).await;
+
+		// assert!(true);
+	}
+}

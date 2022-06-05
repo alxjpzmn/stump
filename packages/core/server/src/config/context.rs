@@ -17,6 +17,7 @@ type TaskSender = UnboundedSender<TaskResponder<InternalTask>>;
 
 type ClientChannel = (Sender<ClientEvent>, Receiver<ClientEvent>);
 
+#[derive(Clone)]
 pub struct Context {
 	pub db: Arc<prisma::PrismaClient>,
 	pub event_sender: Arc<EventSender>,
