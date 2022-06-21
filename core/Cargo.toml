@@ -39,3 +39,8 @@ rocket_okapi = { version = "0.8.0-rc.2", features = ["rapidoc", "swagger"] }
 schemars = "0.8.10"
 fern = "0.6.1"
 toml = "0.5.9"
+
+
+[target.aarch64-unknown-linux-musl.dependencies]
+openssl = { version = "0.10.40", features = ["vendored"] }
+# rusqlite = { version = "0.25.4", features = ["bundled"] }

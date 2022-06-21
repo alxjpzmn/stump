@@ -19,19 +19,22 @@ FROM --platform=$BUILDPLATFORM rust:1.60.0 AS builder
 
 RUN dpkg --add-architecture arm64
 
-RUN apt-get update -y && apt-get -y install clang llvm pkg-config build-essential musl-dev musl-tools musl:arm64 libssl-dev openssl sqlite3 libsqlite3-dev gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev:arm64 libstdc++-devel
+# FIXME: I absolutely do not need all of these, once I get it working I need to clean it up
+RUN apt-get update -y && apt-get -y install clang llvm pkg-config build-essential musl-dev musl-tools musl:arm64 libssl-dev openssl sqlite3 libsqlite3-dev gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev:arm64
+
+RUN rustup target add aarch64-unknown-linux-musl
 
 # Note: This is a workaround for gcc compilation issues when cross compiling for arm64.
 # I need to ALSO do this for g++ comilation issues when cross compiling for arm64.
 # TODO: I have not yet found a way to fix that.
 ENV CC_aarch64_unknown_linux_musl=clang
 
+# FIXME: Failed to find tool. Is `aarch64-linux-musl-g++` installed?
+
 WORKDIR /app
 
 COPY .cargo .cargo
 COPY core/ .
-
-RUN rustup target add aarch64-unknown-linux-musl
 
 ARG TARGETPLATFORM
 RUN case "$TARGETPLATFORM" in \
